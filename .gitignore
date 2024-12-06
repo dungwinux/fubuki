@@ -1,0 +1,10 @@
+*.exe
+*.ilk
+*.exp
+*.lib
+*.pdb
+*.gcda
+*.gcno
+*.prof*
+html/
+.vscode/
