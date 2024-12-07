@@ -11,7 +11,8 @@ TODO:
 - [ ]   Add params to ByteInstruction
 - [ ]   Implement pipeline
 - [ ]   Add support for `#LO` and `#HI`
-- [ ]   Implement offset immediate
+- [x]   Implement offset immediate
+- [x]   Remove builder pattern in ByteInstruction to guarantee RVO
 - [ ]   Custom varaint (The current one is super heavy)
 - [ ]   Size reduction
 - [ ]   Make types formattable

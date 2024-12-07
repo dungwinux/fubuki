@@ -376,6 +376,9 @@ struct Relative {
 };
 }; // namespace AddressingType
 
+// Hacky way
+#define AddressingMode typename
+
 namespace Param {
 
 struct Label {
@@ -400,9 +403,7 @@ struct Offset {
     svalue_t store;
     Offset(decltype(store) v) : store(v) {};
 };
-struct A {
-    A() = default;
-};
+struct A {};
 struct X {};
 struct Y {};
 struct Indirect {};
@@ -441,51 +442,83 @@ Params parse(std::string_view raw_params) {
                 address_t address = parse_int<address_t>(first.substr(2, first.length() - 3)).value();
                 switch (psize) {
                 case 1:
-                    return std::make_pair(Indirect{}, Address{address});
+                    return IndirectAddress{Indirect{}, Address{address}}; // JMP ($4000)
                 case 2:
                     if (str_equal<"Y">(rough[1])) {
-                        return std::make_pair(std::make_pair(Indirect{}, Y{}), Address{address});
+                        return IndirectIdxAddress{{Indirect{}, Y{}}, Address{address}}; // LDA ($40), Y
                     }
                 }
             } else if (first.length() > 2) {
-                return std::make_pair(Indirect{}, Label{first.substr(1, first.length() - 2)});
+                switch (psize) {
+                case 1:
+                    return IndirectLabel{Indirect{}, Label{first.substr(1, first.length() - 2)}}; // JMP (TARGET)
+                case 2:
+                    if (str_equal<"Y">(rough[1])) {
+                        return IndirectIdxLabel{{Indirect{}, Y{}},
+                                                Label{first.substr(1, first.length() - 2)}}; // LDA (DST), Y
+                    }
+                }
             }
         } else if (psize == 2 && str_equal<"X)">(rough[1])) {
             if (first.length() > 2 && first[1] == '$') {
                 address_t address = parse_int<address_t>(first.substr(2)).value();
-                return std::make_pair(std::make_pair(Indirect{}, X{}), Address{address});
+                return IdxIndirectAddress{{Indirect{}, X{}}, Address{address}}; // LDA ($40, X)
             } else if (first.length() > 1) {
-                return std::make_pair(std::make_pair(Indirect{}, X{}), Label{first.substr(1)});
+                return IdxIndirectLabel{{Indirect{}, X{}}, Label{first.substr(1)}}; // LDA (MEM, X)
             }
         }
     } else if (psize == 1 && first.starts_with('#')) {
         auto value = parse_int<value_t, 10>(first.substr(1)).value();
-        return Imm{value};
+        return Imm{value}; // LDA #10
     } else if (first.starts_with('$')) {
         address_t address = parse_int<address_t>(first.substr(1)).value();
         switch (psize) {
         case 1:
-            return Address{address};
+            return Address{address}; // LDA $00
         case 2:
             if (str_equal<"X">(rough[1])) {
-                return std::make_pair(Address{address}, X{});
+                return AddressX{Address{address}, X{}}; // STY $10, X
             } else if (str_equal<"Y">(rough[1])) {
-                return std::make_pair(Address{address}, Y{});
+                return AddressY{Address{address}, Y{}}; // LDX $10, Y
             }
         }
+    } else if (first.starts_with("*+")) {
+        return Offset{parse_int<svalue_t, 10>(first.substr(2)).value()}; // BEQ *+4
+    } else if (first.starts_with("*-")) {
+        return Offset{parse_int<svalue_t, 10>(first.substr(1)).value()}; // BEQ *-2 (Infinite loop)
     } else {
         switch (psize) {
         case 1:
-            return Label{first};
+            return Label{first}; // ASL ANSWER, BEQ LABEL
         case 2:
             if (str_equal<"X">(rough[1])) {
-                return std::make_pair(Label{first}, X{});
+                return LabelX{Label{first}, X{}}; // AND TEMP, X
             } else if (str_equal<"Y">(rough[1])) {
-                return std::make_pair(Label{first}, Y{});
+                return LabelY{Label{first}, Y{}}; // STX TEMP, Y
             }
         }
     }
     return std::monostate{};
+}
+
+template <AddressingMode am>
+Params decode() {
+    if constexpr (std::is_same_v<am, AddressingType::Accumulator>) {
+        return A{};
+    }
+    if constexpr (std::is_same_v<am, AddressingType::Implied>) {
+        return Implied{};
+    }
+}
+
+template <AddressingMode am>
+Params decode(typename am::imm_type imm) {
+    if constexpr (is_one_of_v<am, AddressingType::Absolute, AddressingType::ZeroPage>) {
+        return Address{imm};
+    }
+    if constexpr (is_one_of_v<am, AddressingType::AbsoluteX, AddressingType::ZeroPageX>) {
+        return AddressX{Address{imm}, X{}};
+    }
 }
 
 } // namespace Param
@@ -497,8 +530,6 @@ Params parse(std::string_view raw_params) {
 //                                      AddressingType::Indirect, AddressingType::IndirectX, AddressingType::IndirectY,
 //                                      AddressingType::Implied, AddressingType::Relative>;
 
-// Hacky way
-#define AddressingMode typename
 template <typename T>
 concept is_typeA = is_one_of_v<T, AddressingType::Immediate, AddressingType::ZeroPage, AddressingType::ZeroPageX,
                                AddressingType::Absolute, AddressingType::AbsoluteX, AddressingType::AbsoluteY,
@@ -1509,13 +1540,16 @@ Processor &operator<<(Processor &proc, std::function<Instruction::Result(Process
 struct ByteInstruction : std::function<Result(const Processor &)> {
     char metadata_mne[4] = {0};
     // Param::Params metadata_params;
-
-    ByteInstruction &add_mne(std::string_view name) {
-        std::memcpy(metadata_mne, name.data(), 3);
-        // metadata_params = params;
-        return *this;
-    }
 };
+
+inline void add_mne(ByteInstruction &i, std::string_view name) {
+    std::memcpy(i.metadata_mne, name.data(), 3);
+}
+
+template <TpString name>
+inline void add_mne(ByteInstruction &i) {
+    std::memcpy(i.metadata_mne, name.value, 3);
+}
 
 namespace Assemble {
 
@@ -1610,8 +1644,11 @@ template <AddressingMode am, size_t size = am::size, typename T>
 inline auto to_inst1(std::string_view mne, T &&arg) {
 #define try_match(exp_mne, fn)                                                                                         \
     if constexpr (requires(const Processor &p) { fn{}(p, std::forward<T>(arg)); })                                     \
-        if (str_equal<exp_mne>(mne))                                                                                   \
-            return ByteInstruction{std::bind(fn{}, std::placeholders::_1, std::forward<T>(arg))}.add_mne(mne);
+        if (str_equal<exp_mne>(mne)) {                                                                                 \
+            ByteInstruction i{std::bind(fn{}, std::placeholders::_1, std::forward<T>(arg))};                           \
+            add_mne<exp_mne>(i);                                                                                       \
+            return i;                                                                                                  \
+        }
 
     try_match("ADC", (AddWithCarry<am, size>));
     try_match("LDA", (LoadA<am, size>));
@@ -1668,8 +1705,11 @@ inline auto to_inst0(std::string_view mne) {
 
 #define try_match(exp_mne, fn)                                                                                         \
     if constexpr (requires(const Processor &p) { fn{}(p); })                                                           \
-        if (str_equal<exp_mne>(mne))                                                                                   \
-            return ByteInstruction{fn{}}.add_mne(mne);
+        if (str_equal<exp_mne>(mne)) {                                                                                 \
+            ByteInstruction i{fn{}};                                                                                   \
+            add_mne<exp_mne>(i);                                                                                       \
+            return i;                                                                                                  \
+        }
 
     try_match("LSR", (LogicalShiftRightA<am, size>));
     try_match("ASL", (ArithShiftLeftA<am, size>));
@@ -1782,8 +1822,7 @@ auto jit_listing(R &&listing, LabelMap const &labels, address_t base) {
                 //    [](std::monostate) { /* Error! */ },
                 [](auto x) {
 #ifndef NDEBUG
-                    std::cerr << std::format("[Internal] Something is wrong when assembling with: {}\n",
-                                             typeid(x).name());
+                    std::cerr << std::format("[Internal] Something is wrong when jiting with: {}\n", typeid(x).name());
 #endif
                     return ByteInstruction{nullptr};
                 }},
@@ -1893,7 +1932,7 @@ auto parse_text(std::string_view file_content) {
     }
     size_t const base{0x200};
     std::map<std::string, address_t> labels = prescan_label(listing, listing_label, base, {});
-    return std::make_tuple(jit_listing(listing, labels, base), listing, labels);
+    return std::make_pair(std::move(listing), std::move(labels));
 }
 
 template <AddressingMode am>
@@ -2110,8 +2149,9 @@ auto assemble(R &&listing, LabelMap const &labels, address_t base) {
                     }
                 },
                 [&bytecode, mne](Param::Offset p) {
-                    bytecode.append_range(std::vector<value_t>{encode_inst_op<AddressingType::Relative>(mne),
-                                                               static_cast<value_t>(p.store)});
+                    bytecode.append_range(
+                        std::vector<value_t>{encode_inst_op<AddressingType::Relative>(mne),
+                                             static_cast<value_t>(p.store - AddressingType::Relative::size)});
                 },
                 [&bytecode, mne](Param::Implied) {
                     return bytecode.push_back(encode_inst_op<AddressingType::Implied>(mne));
@@ -2234,7 +2274,9 @@ auto disassemble(std::span<value_t> bytecode) {
                        using Match = Assemble::to_impl<0, mne, am>::function;                                          \
                        if constexpr (Match::value) {                                                                   \
                            using Fn = Match::Fun;                                                                      \
-                           return ByteInstruction{Fn{}}.add_mne(mne);                                                  \
+                           ByteInstruction i{Fn{}};                                                                    \
+                           add_mne<mne>(i);                                                                            \
+                           return i;                                                                                   \
                        }                                                                                               \
                    }                                                                                                   \
                    if constexpr (has_imm<am>) {                                                                        \
@@ -2243,7 +2285,9 @@ auto disassemble(std::span<value_t> bytecode) {
                            if constexpr (Match::value) {                                                               \
                                value_t v = bytecode.size() > 1 ? bytecode[1] : value_t{0};                             \
                                using Fn = Match::Fun;                                                                  \
-                               return ByteInstruction{std::bind(Fn{}, std::placeholders::_1, v)}.add_mne(mne);         \
+                               ByteInstruction i{std::bind(Fn{}, std::placeholders::_1, v)};                           \
+                               add_mne<mne>(i);                                                                        \
+                               return i;                                                                               \
                            }                                                                                           \
                        }                                                                                               \
                        if constexpr (std::is_same_v<address_t, typename am::imm_type>) {                               \
@@ -2251,7 +2295,9 @@ auto disassemble(std::span<value_t> bytecode) {
                            if constexpr (Match::value) {                                                               \
                                address_t v = bytecode.size() > 2 ? ((bytecode[2] << 8) | bytecode[1]) : address_t{0};  \
                                using Fn = Match::Fun;                                                                  \
-                               return ByteInstruction{std::bind(Fn{}, std::placeholders::_1, v)}.add_mne(mne);         \
+                               ByteInstruction i{std::bind(Fn{}, std::placeholders::_1, v)};                           \
+                               add_mne<mne>(i);                                                                        \
+                               return i;                                                                               \
                            }                                                                                           \
                        }                                                                                               \
                        if constexpr (std::is_same_v<svalue_t, typename am::imm_type>) {                                \
@@ -2259,7 +2305,9 @@ auto disassemble(std::span<value_t> bytecode) {
                            if constexpr (Match::value) {                                                               \
                                svalue_t v = bytecode.size() > 1 ? bytecode[1] : svalue_t{0};                           \
                                using Fn = Match::Fun;                                                                  \
-                               return ByteInstruction{std::bind(Fn{}, std::placeholders::_1, v)}.add_mne(mne);         \
+                               ByteInstruction i{std::bind(Fn{}, std::placeholders::_1, v)};                           \
+                               add_mne<mne>(i);                                                                        \
+                               return i;                                                                               \
                            }                                                                                           \
                        }                                                                                               \
                    }                                                                                                   \
@@ -2585,7 +2633,8 @@ void test_assemble() {
     {
         std::ifstream fd{"test.asm"};
         std::string str((std::istreambuf_iterator<char>(fd)), std::istreambuf_iterator<char>());
-        auto [a2, ins, ctx] = parse_text(str);
+        auto [ins, ctx] = parse_text(str);
+        auto a2 = jit_listing(ins, ctx, 0x200);
         Fubuki::Processor proc2;
         proc2.memory.set_byte(0xFFFEU, 0xFE);
         proc2.memory.set_byte(0xFFFFU, 0xCA);
@@ -2603,7 +2652,7 @@ void test_assemble() {
     {
         std::ifstream fd{"test2.asm"};
         std::string str2((std::istreambuf_iterator<char>(fd)), std::istreambuf_iterator<char>());
-        auto [a3, ins3, ctx3] = parse_text(str2);
+        auto [ins3, ctx3] = parse_text(str2);
         Fubuki::Processor proc3;
         proc3.memory.set_byte(0xFFFEU, 0xFE);
         proc3.memory.set_byte(0xFFFFU, 0xCA);

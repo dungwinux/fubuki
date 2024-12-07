@@ -3,5 +3,5 @@
 loop:   STX $00
         ADC $00
         DEX
-        BNE loop
+        BNE *-5 ; Should be the same as BNE loop
         BRK
