@@ -1,6 +1,7 @@
 
 #include "helper.hpp"
 
+#include <any>
 #include <array>
 #include <concepts>
 #include <fstream>
@@ -82,8 +83,6 @@ struct Processor {
      * REGISTERS
      */
     using flag_type = bool;
-
-    static constexpr size_t stage = 5;
 
     /**
      * Program Counter
@@ -247,6 +246,14 @@ struct MemoryWriteList {
     }
 };
 
+template <std::ranges::range R>
+bool load_to_memory(Processor &proc, address_t address, R &&r) {
+    for (auto [offset, b] : r | std::views::enumerate) {
+        proc.memory.set_byte(address + offset, b);
+    }
+    return true;
+}
+
 template <typename T>
 concept imm_ct = std::unsigned_integral<T>;
 // #define imm_ct typename
@@ -259,12 +266,19 @@ struct Result {
     ProcessorChange m_pchange;
     MemoryWriteList m_write;
     // std::array<std::size_t, Processor::stage> cycle = {0};
+    Result(Result const &other) {
+        m_pchange = other.m_pchange;
+        m_write = other.m_write;
+    };
+    Result(Result &&other) {
+        m_pchange = other.m_pchange;
+        m_write = other.m_write;
+    };
     Result(ProcessorChange change) : m_pchange(change) {};
     Result(MemoryWrite write) : m_write{write} {};
     Result(ProcessorChange change, MemoryWrite write) : m_pchange(change), m_write{write} {};
     Result(ProcessorChange change, std::initializer_list<MemoryWrite> writes) : m_pchange(change), m_write{writes} {};
-
-    friend Processor &operator<<(Processor &proc, Result const &change);
+    // friend Processor &operator<<(Processor &proc, Result const &change);
 };
 
 Processor &operator<<(Processor &proc, Result const &change) {
@@ -467,6 +481,9 @@ Params parse(std::string_view raw_params) {
                 return IdxIndirectLabel{{Indirect{}, X{}}, Label{first.substr(1)}}; // LDA (MEM, X)
             }
         }
+    } else if (psize == 1 && first.starts_with("#$")) {
+        auto value = parse_int<value_t, 16>(first.substr(2)).value();
+        return Imm{value}; // LDA #10
     } else if (psize == 1 && first.starts_with('#')) {
         auto value = parse_int<value_t, 10>(first.substr(1)).value();
         return Imm{value}; // LDA #10
@@ -1528,7 +1545,7 @@ inline auto i_(F &&fn, Args &&...args) {
     return std::bind(fn, std::placeholders::_1, std::forward<Args>(args)...);
 }
 
-Processor &operator<<(Processor &proc, std::function<Instruction::Result(Processor const &)> lazy_instruction) {
+Processor &operator<<(Processor &proc, std::function<Result(const Processor &)> lazy_instruction) {
     if (lazy_instruction) {
         auto change = lazy_instruction(proc);
         change.m_pchange.commit_to(proc);
@@ -1544,34 +1561,184 @@ struct ByteInstruction : std::function<Result(const Processor &)> {
 
 inline void add_mne(ByteInstruction &i, std::string_view name) {
     std::memcpy(i.metadata_mne, name.data(), 3);
+    i.metadata_mne[3] = 0;
 }
 
 template <TpString name>
 inline void add_mne(ByteInstruction &i) {
     std::memcpy(i.metadata_mne, name.value, 3);
+    i.metadata_mne[3] = 0;
 }
+
+#define opcode_map(try_match)                                                                                          \
+    try_match(0x00, "BRK", Instruction::AddressingType::Implied);                                                      \
+    try_match(0x01, "ORA", Instruction::AddressingType::IndirectX);                                                    \
+    try_match(0x05, "ORA", Instruction::AddressingType::ZeroPage);                                                     \
+    try_match(0x06, "ASL", Instruction::AddressingType::ZeroPage);                                                     \
+    try_match(0x08, "PHP", Instruction::AddressingType::Implied);                                                      \
+    try_match(0x09, "ORA", Instruction::AddressingType::Immediate);                                                    \
+    try_match(0x0A, "ASL", Instruction::AddressingType::Accumulator);                                                  \
+    try_match(0x0D, "ORA", Instruction::AddressingType::Absolute);                                                     \
+    try_match(0x0E, "ASL", Instruction::AddressingType::Absolute);                                                     \
+    try_match(0x10, "BPL", Instruction::AddressingType::Relative);                                                     \
+    try_match(0x11, "ORA", Instruction::AddressingType::IndirectY);                                                    \
+    try_match(0x15, "ORA", Instruction::AddressingType::ZeroPageX);                                                    \
+    try_match(0x16, "ASL", Instruction::AddressingType::ZeroPageX);                                                    \
+    try_match(0x18, "CLC", Instruction::AddressingType::Implied);                                                      \
+    try_match(0x19, "ORA", Instruction::AddressingType::AbsoluteY);                                                    \
+    try_match(0x1D, "ORA", Instruction::AddressingType::AbsoluteX);                                                    \
+    try_match(0x1E, "ASL", Instruction::AddressingType::AbsoluteX);                                                    \
+    try_match(0x20, "JSR", Instruction::AddressingType::Absolute);                                                     \
+    try_match(0x21, "AND", Instruction::AddressingType::IndirectX);                                                    \
+    try_match(0x24, "BIT", Instruction::AddressingType::ZeroPage);                                                     \
+    try_match(0x25, "AND", Instruction::AddressingType::ZeroPage);                                                     \
+    try_match(0x26, "ROL", Instruction::AddressingType::ZeroPage);                                                     \
+    try_match(0x28, "PLP", Instruction::AddressingType::Implied);                                                      \
+    try_match(0x29, "AND", Instruction::AddressingType::Immediate);                                                    \
+    try_match(0x2A, "ROL", Instruction::AddressingType::Accumulator);                                                  \
+    try_match(0x2C, "BIT", Instruction::AddressingType::Absolute);                                                     \
+    try_match(0x2D, "AND", Instruction::AddressingType::Absolute);                                                     \
+    try_match(0x2E, "ROL", Instruction::AddressingType::Absolute);                                                     \
+    try_match(0x30, "BMI", Instruction::AddressingType::Relative);                                                     \
+    try_match(0x31, "AND", Instruction::AddressingType::IndirectY);                                                    \
+    try_match(0x35, "AND", Instruction::AddressingType::ZeroPageX);                                                    \
+    try_match(0x36, "ROL", Instruction::AddressingType::ZeroPageX);                                                    \
+    try_match(0x38, "SEC", Instruction::AddressingType::Implied);                                                      \
+    try_match(0x39, "AND", Instruction::AddressingType::AbsoluteY);                                                    \
+    try_match(0x3D, "AND", Instruction::AddressingType::AbsoluteX);                                                    \
+    try_match(0x3E, "ROL", Instruction::AddressingType::AbsoluteX);                                                    \
+    try_match(0x40, "RTI", Instruction::AddressingType::Implied);                                                      \
+    try_match(0x41, "EOR", Instruction::AddressingType::IndirectX);                                                    \
+    try_match(0x45, "EOR", Instruction::AddressingType::ZeroPage);                                                     \
+    try_match(0x46, "LSR", Instruction::AddressingType::ZeroPage);                                                     \
+    try_match(0x48, "PHA", Instruction::AddressingType::Implied);                                                      \
+    try_match(0x49, "EOR", Instruction::AddressingType::Immediate);                                                    \
+    try_match(0x4A, "LSR", Instruction::AddressingType::Accumulator);                                                  \
+    try_match(0x4C, "JMP", Instruction::AddressingType::Absolute);                                                     \
+    try_match(0x4D, "EOR", Instruction::AddressingType::Absolute);                                                     \
+    try_match(0x4E, "LSR", Instruction::AddressingType::Absolute);                                                     \
+    try_match(0x50, "BVC", Instruction::AddressingType::Relative);                                                     \
+    try_match(0x51, "EOR", Instruction::AddressingType::IndirectY);                                                    \
+    try_match(0x55, "EOR", Instruction::AddressingType::ZeroPageX);                                                    \
+    try_match(0x56, "LSR", Instruction::AddressingType::ZeroPageX);                                                    \
+    try_match(0x58, "CLI", Instruction::AddressingType::Implied);                                                      \
+    try_match(0x59, "EOR", Instruction::AddressingType::AbsoluteY);                                                    \
+    try_match(0x5D, "EOR", Instruction::AddressingType::AbsoluteX);                                                    \
+    try_match(0x5E, "LSR", Instruction::AddressingType::AbsoluteX);                                                    \
+    try_match(0x60, "RTS", Instruction::AddressingType::Implied);                                                      \
+    try_match(0x61, "ADC", Instruction::AddressingType::IndirectX);                                                    \
+    try_match(0x65, "ADC", Instruction::AddressingType::ZeroPage);                                                     \
+    try_match(0x66, "ROR", Instruction::AddressingType::ZeroPage);                                                     \
+    try_match(0x68, "PLA", Instruction::AddressingType::Implied);                                                      \
+    try_match(0x69, "ADC", Instruction::AddressingType::Immediate);                                                    \
+    try_match(0x6A, "ROR", Instruction::AddressingType::Accumulator);                                                  \
+    try_match(0x6C, "JMP", Instruction::AddressingType::Absolute);                                                     \
+    try_match(0x6D, "ADC", Instruction::AddressingType::Absolute);                                                     \
+    try_match(0x6E, "ROR", Instruction::AddressingType::Absolute);                                                     \
+    try_match(0x70, "BVC", Instruction::AddressingType::Relative);                                                     \
+    try_match(0x71, "ADC", Instruction::AddressingType::IndirectY);                                                    \
+    try_match(0x75, "ADC", Instruction::AddressingType::ZeroPageX);                                                    \
+    try_match(0x76, "ROR", Instruction::AddressingType::ZeroPageX);                                                    \
+    try_match(0x78, "SEI", Instruction::AddressingType::Implied);                                                      \
+    try_match(0x79, "ADC", Instruction::AddressingType::AbsoluteY);                                                    \
+    try_match(0x7D, "ADC", Instruction::AddressingType::AbsoluteX);                                                    \
+    try_match(0x7E, "ROR", Instruction::AddressingType::AbsoluteX);                                                    \
+    try_match(0x81, "STA", Instruction::AddressingType::IndirectX);                                                    \
+    try_match(0x84, "STY", Instruction::AddressingType::ZeroPage);                                                     \
+    try_match(0x85, "STA", Instruction::AddressingType::ZeroPage);                                                     \
+    try_match(0x86, "STX", Instruction::AddressingType::ZeroPage);                                                     \
+    try_match(0x88, "DEY", Instruction::AddressingType::Implied);                                                      \
+    try_match(0x8A, "TXA", Instruction::AddressingType::Implied);                                                      \
+    try_match(0x8C, "STY", Instruction::AddressingType::Absolute);                                                     \
+    try_match(0x8D, "STA", Instruction::AddressingType::Absolute);                                                     \
+    try_match(0x8E, "STX", Instruction::AddressingType::Absolute);                                                     \
+    try_match(0x90, "BCC", Instruction::AddressingType::Relative);                                                     \
+    try_match(0x91, "STA", Instruction::AddressingType::IndirectY);                                                    \
+    try_match(0x94, "STY", Instruction::AddressingType::ZeroPageX);                                                    \
+    try_match(0x95, "STA", Instruction::AddressingType::ZeroPageX);                                                    \
+    try_match(0x96, "STX", Instruction::AddressingType::ZeroPageY);                                                    \
+    try_match(0x98, "TYA", Instruction::AddressingType::Implied);                                                      \
+    try_match(0x99, "STA", Instruction::AddressingType::AbsoluteY);                                                    \
+    try_match(0x9A, "TXS", Instruction::AddressingType::Implied);                                                      \
+    try_match(0x9D, "STA", Instruction::AddressingType::AbsoluteX);                                                    \
+    try_match(0xA0, "LDY", Instruction::AddressingType::Immediate);                                                    \
+    try_match(0xA1, "LDA", Instruction::AddressingType::IndirectX);                                                    \
+    try_match(0xA2, "LDX", Instruction::AddressingType::Immediate);                                                    \
+    try_match(0xA4, "LDY", Instruction::AddressingType::ZeroPage);                                                     \
+    try_match(0xA5, "LDA", Instruction::AddressingType::ZeroPage);                                                     \
+    try_match(0xA6, "LDX", Instruction::AddressingType::ZeroPage);                                                     \
+    try_match(0xA8, "TAY", Instruction::AddressingType::Implied);                                                      \
+    try_match(0xA9, "LDA", Instruction::AddressingType::Immediate);                                                    \
+    try_match(0xAA, "TAX", Instruction::AddressingType::Implied);                                                      \
+    try_match(0xAC, "LDY", Instruction::AddressingType::Absolute);                                                     \
+    try_match(0xAD, "LDA", Instruction::AddressingType::Absolute);                                                     \
+    try_match(0xAE, "LDX", Instruction::AddressingType::Absolute);                                                     \
+    try_match(0xB0, "BCS", Instruction::AddressingType::Relative);                                                     \
+    try_match(0xB1, "LDA", Instruction::AddressingType::IndirectY);                                                    \
+    try_match(0xB4, "LDY", Instruction::AddressingType::ZeroPageX);                                                    \
+    try_match(0xB5, "LDA", Instruction::AddressingType::ZeroPageX);                                                    \
+    try_match(0xB6, "LDX", Instruction::AddressingType::ZeroPageY);                                                    \
+    try_match(0xB8, "CLV", Instruction::AddressingType::Implied);                                                      \
+    try_match(0xB9, "LDA", Instruction::AddressingType::AbsoluteY);                                                    \
+    try_match(0xBA, "TSX", Instruction::AddressingType::Implied);                                                      \
+    try_match(0xBC, "LDY", Instruction::AddressingType::AbsoluteX);                                                    \
+    try_match(0xBD, "LDA", Instruction::AddressingType::AbsoluteX);                                                    \
+    try_match(0xBE, "LDX", Instruction::AddressingType::AbsoluteY);                                                    \
+    try_match(0xC0, "CPY", Instruction::AddressingType::Immediate);                                                    \
+    try_match(0xC1, "CMP", Instruction::AddressingType::IndirectX);                                                    \
+    try_match(0xC4, "CPY", Instruction::AddressingType::ZeroPage);                                                     \
+    try_match(0xC5, "CMP", Instruction::AddressingType::ZeroPage);                                                     \
+    try_match(0xC6, "DEC", Instruction::AddressingType::ZeroPage);                                                     \
+    try_match(0xC8, "INY", Instruction::AddressingType::Implied);                                                      \
+    try_match(0xC9, "CMP", Instruction::AddressingType::Immediate);                                                    \
+    try_match(0xCA, "DEX", Instruction::AddressingType::Implied);                                                      \
+    try_match(0xCC, "CPY", Instruction::AddressingType::Absolute);                                                     \
+    try_match(0xCD, "CMP", Instruction::AddressingType::Absolute);                                                     \
+    try_match(0xCE, "DEC", Instruction::AddressingType::Absolute);                                                     \
+    try_match(0xD0, "BNE", Instruction::AddressingType::Relative);                                                     \
+    try_match(0xD1, "CMP", Instruction::AddressingType::IndirectY);                                                    \
+    try_match(0xD5, "CMP", Instruction::AddressingType::ZeroPageX);                                                    \
+    try_match(0xD6, "DEC", Instruction::AddressingType::ZeroPageY);                                                    \
+    try_match(0xD8, "CLD", Instruction::AddressingType::Implied);                                                      \
+    try_match(0xD9, "CMP", Instruction::AddressingType::AbsoluteY);                                                    \
+    try_match(0xDD, "CMP", Instruction::AddressingType::AbsoluteX);                                                    \
+    try_match(0xDE, "DEC", Instruction::AddressingType::AbsoluteY);                                                    \
+    try_match(0xE0, "CPX", Instruction::AddressingType::Immediate);                                                    \
+    try_match(0xE1, "SBC", Instruction::AddressingType::IndirectX);                                                    \
+    try_match(0xE4, "CPX", Instruction::AddressingType::ZeroPage);                                                     \
+    try_match(0xE5, "SBC", Instruction::AddressingType::ZeroPage);                                                     \
+    try_match(0xE6, "INC", Instruction::AddressingType::ZeroPage);                                                     \
+    try_match(0xE8, "INX", Instruction::AddressingType::Implied);                                                      \
+    try_match(0xE9, "SBC", Instruction::AddressingType::Immediate);                                                    \
+    try_match(0xEA, "NOP", Instruction::AddressingType::Implied);                                                      \
+    try_match(0xEC, "CPX", Instruction::AddressingType::Absolute);                                                     \
+    try_match(0xED, "SBC", Instruction::AddressingType::Absolute);                                                     \
+    try_match(0xEE, "INC", Instruction::AddressingType::Absolute);                                                     \
+    try_match(0xF0, "BNE", Instruction::AddressingType::Relative);                                                     \
+    try_match(0xF1, "SBC", Instruction::AddressingType::IndirectY);                                                    \
+    try_match(0xF5, "SBC", Instruction::AddressingType::ZeroPageX);                                                    \
+    try_match(0xF6, "INC", Instruction::AddressingType::ZeroPageY);                                                    \
+    try_match(0xF8, "SED", Instruction::AddressingType::Implied);                                                      \
+    try_match(0xF9, "SBC", Instruction::AddressingType::AbsoluteY);                                                    \
+    try_match(0xFD, "SBC", Instruction::AddressingType::AbsoluteX);                                                    \
+    try_match(0xFE, "INC", Instruction::AddressingType::AbsoluteY)
 
 namespace Assemble {
 
 using namespace std::literals;
 
-struct AsmInst {
+struct AsmbInstruction {
     Param::Params parameter;
     // Last byte should be null
     char mne[4];
 
-    AsmInst(std::string_view rawmne, Param::Params &&param) : parameter{param} {
+    AsmbInstruction(std::string_view rawmne, Param::Params &&param) : parameter{param} {
         std::memcpy(mne, rawmne.data(), 3);
         mne[3] = '\0';
     }
 };
 
-AsmInst parse_instruction(std::string_view line) {
-    constexpr auto const split_comment = [](std::string_view line) -> auto {
-        auto index = line.find_first_of(';');
-        return index == std::string_view::npos ? std::make_pair(line, ""sv)
-                                               : std::make_pair(line.substr(0, index), line.substr(index));
-    };
+AsmbInstruction parse_instruction(std::string_view raw_instruction) {
     constexpr auto const split_instruction = [](std::string_view line) -> auto {
         auto stage1 = trim_left(trim_right(line));
         auto index = stage1.find_first_of(' ');
@@ -1579,8 +1746,6 @@ AsmInst parse_instruction(std::string_view line) {
                    ? std::make_pair(stage1, ""sv)
                    : std::make_pair(stage1.substr(0, index), trim_left(stage1.substr(index)));
     };
-
-    auto [raw_instruction, _] = split_comment(line);
     auto [mne, raw_parameters] = split_instruction(raw_instruction);
     return {mne, Param::parse(raw_parameters)};
 }
@@ -1752,7 +1917,7 @@ using LabelMap = std::map<std::string, address_t>;
 using LabelInstructionMap = std::map<size_t, std::string>;
 
 template <std::ranges::range R>
-// requires std::is_same_v<AsmInst, std::ranges::range_value_t<R>>
+// requires std::is_same_v<AsmbInstruction, std::ranges::range_value_t<R>>
 auto jit_listing(R &&listing, LabelMap const &labels, address_t base) {
     std::vector<ByteInstruction> jited;
     for (auto i : listing) {
@@ -1833,7 +1998,7 @@ auto jit_listing(R &&listing, LabelMap const &labels, address_t base) {
 }
 
 template <std::ranges::range R>
-auto prescan_label(R &&listing, LabelInstructionMap const &listing_labels, address_t base, LabelMap const &known) {
+inline auto scan_label(R &&listing, LabelInstructionMap const &listing_labels, address_t base, LabelMap const &known) {
     LabelMap result = known;
     auto current_addr{base};
     for (auto [index, i] : listing | std::views::enumerate) {
@@ -1908,8 +2073,22 @@ auto prescan_label(R &&listing, LabelInstructionMap const &listing_labels, addre
     return result;
 }
 
+std::optional<AsmbInstruction> parse_line(std::string_view line) {
+    constexpr auto const split_comment = [](std::string_view line) -> auto {
+        auto index = line.find_first_of(';');
+        return index == std::string_view::npos ? std::make_pair(line, ""sv)
+                                               : std::make_pair(line.substr(0, index), line.substr(index));
+    };
+    auto [raw_instruction, _] = split_comment(line);
+    auto clean = trim_left(raw_instruction);
+    if (clean.empty()) {
+        return std::nullopt;
+    }
+    return parse_instruction(clean);
+}
+
 auto parse_text(std::string_view file_content) {
-    std::vector<AsmInst> listing;
+    std::vector<AsmbInstruction> listing;
     LabelInstructionMap listing_label;
     for (auto line : file_content | std::views::split('\n') | std::views::filter(not_empty) | cast_sv) {
         bool parsed = false;
@@ -1921,7 +2100,10 @@ auto parse_text(std::string_view file_content) {
             parsed = true;
         }
         if (next.find_first_not_of(' ') != std::string_view::npos) {
-            listing.push_back(parse_instruction(next));
+            auto res = parse_line(next);
+            if (res) {
+                listing.push_back(res.value());
+            }
             parsed = true;
         }
 #ifndef NDEBUG
@@ -1931,7 +2113,7 @@ auto parse_text(std::string_view file_content) {
 #endif
     }
     size_t const base{0x200};
-    std::map<std::string, address_t> labels = prescan_label(listing, listing_label, base, {});
+    std::map<std::string, address_t> labels = scan_label(listing, listing_label, base, {});
     return std::make_pair(std::move(listing), std::move(labels));
 }
 
@@ -1941,157 +2123,8 @@ constexpr inline value_t encode_inst_op(std::string_view mne) {
     if constexpr (std::is_same_v<exp_am, am>)                                                                          \
         if (str_equal<exp_mne>(mne))                                                                                   \
             return (value);
+    opcode_map(try_match);
 
-    try_match(0x00, "BRK", AddressingType::Implied);
-    try_match(0x01, "ORA", AddressingType::IndirectX);
-    try_match(0x05, "ORA", AddressingType::ZeroPage);
-    try_match(0x06, "ASL", AddressingType::ZeroPage);
-    try_match(0x08, "PHP", AddressingType::Implied);
-    try_match(0x09, "ORA", AddressingType::Immediate);
-    try_match(0x0A, "ASL", AddressingType::Accumulator);
-    try_match(0x0D, "ORA", AddressingType::Absolute);
-    try_match(0x0E, "ASL", AddressingType::Absolute);
-    try_match(0x10, "BPL", AddressingType::Relative);
-    try_match(0x11, "ORA", AddressingType::IndirectY);
-    try_match(0x15, "ORA", AddressingType::ZeroPageX);
-    try_match(0x16, "ASL", AddressingType::ZeroPageX);
-    try_match(0x18, "CLC", AddressingType::Implied);
-    try_match(0x19, "ORA", AddressingType::AbsoluteY);
-    try_match(0x1D, "ORA", AddressingType::AbsoluteX);
-    try_match(0x1E, "ASL", AddressingType::AbsoluteX);
-    try_match(0x20, "JSR", AddressingType::Absolute);
-    try_match(0x21, "AND", AddressingType::IndirectX);
-    try_match(0x24, "BIT", AddressingType::ZeroPage);
-    try_match(0x25, "AND", AddressingType::ZeroPage);
-    try_match(0x26, "ROL", AddressingType::ZeroPage);
-    try_match(0x28, "PLP", AddressingType::Implied);
-    try_match(0x29, "AND", AddressingType::Immediate);
-    try_match(0x2A, "ROL", AddressingType::Accumulator);
-    try_match(0x2C, "BIT", AddressingType::Absolute);
-    try_match(0x2D, "AND", AddressingType::Absolute);
-    try_match(0x2E, "ROL", AddressingType::Absolute);
-    try_match(0x30, "BMI", AddressingType::Relative);
-    try_match(0x31, "AND", AddressingType::IndirectY);
-    try_match(0x35, "AND", AddressingType::ZeroPageX);
-    try_match(0x36, "ROL", AddressingType::ZeroPageX);
-    try_match(0x38, "SEC", AddressingType::Implied);
-    try_match(0x39, "AND", AddressingType::AbsoluteY);
-    try_match(0x3D, "AND", AddressingType::AbsoluteX);
-    try_match(0x3E, "ROL", AddressingType::AbsoluteX);
-    try_match(0x40, "RTI", AddressingType::Implied);
-    try_match(0x41, "EOR", AddressingType::IndirectX);
-    try_match(0x45, "EOR", AddressingType::ZeroPage);
-    try_match(0x46, "LSR", AddressingType::ZeroPage);
-    try_match(0x48, "PHA", AddressingType::Implied);
-    try_match(0x49, "EOR", AddressingType::Immediate);
-    try_match(0x4A, "LSR", AddressingType::Accumulator);
-    try_match(0x4C, "JMP", AddressingType::Absolute);
-    try_match(0x4D, "EOR", AddressingType::Absolute);
-    try_match(0x4E, "LSR", AddressingType::Absolute);
-    try_match(0x50, "BVC", AddressingType::Relative);
-    try_match(0x51, "EOR", AddressingType::IndirectY);
-    try_match(0x55, "EOR", AddressingType::ZeroPageX);
-    try_match(0x56, "LSR", AddressingType::ZeroPageX);
-    try_match(0x58, "CLI", AddressingType::Implied);
-    try_match(0x59, "EOR", AddressingType::AbsoluteY);
-    try_match(0x5D, "EOR", AddressingType::AbsoluteX);
-    try_match(0x5E, "LSR", AddressingType::AbsoluteX);
-    try_match(0x60, "RTS", AddressingType::Implied);
-    try_match(0x61, "ADC", AddressingType::IndirectX);
-    try_match(0x65, "ADC", AddressingType::ZeroPage);
-    try_match(0x66, "ROR", AddressingType::ZeroPage);
-    try_match(0x68, "PLA", AddressingType::Implied);
-    try_match(0x69, "ADC", AddressingType::Immediate);
-    try_match(0x6A, "ROR", AddressingType::Accumulator);
-    try_match(0x6C, "JMP", AddressingType::Absolute);
-    try_match(0x6D, "ADC", AddressingType::Absolute);
-    try_match(0x6E, "ROR", AddressingType::Absolute);
-    try_match(0x70, "BVC", AddressingType::Relative);
-    try_match(0x71, "ADC", AddressingType::IndirectY);
-    try_match(0x75, "ADC", AddressingType::ZeroPageX);
-    try_match(0x76, "ROR", AddressingType::ZeroPageX);
-    try_match(0x78, "SEI", AddressingType::Implied);
-    try_match(0x79, "ADC", AddressingType::AbsoluteY);
-    try_match(0x7D, "ADC", AddressingType::AbsoluteX);
-    try_match(0x7E, "ROR", AddressingType::AbsoluteX);
-    try_match(0x81, "STA", AddressingType::IndirectX);
-    try_match(0x84, "STY", AddressingType::ZeroPage);
-    try_match(0x85, "STA", AddressingType::ZeroPage);
-    try_match(0x86, "STX", AddressingType::ZeroPage);
-    try_match(0x88, "DEY", AddressingType::Implied);
-    try_match(0x8A, "TXA", AddressingType::Implied);
-    try_match(0x8C, "STY", AddressingType::Absolute);
-    try_match(0x8D, "STA", AddressingType::Absolute);
-    try_match(0x8E, "STX", AddressingType::Absolute);
-    try_match(0x90, "BCC", AddressingType::Relative);
-    try_match(0x91, "STA", AddressingType::IndirectY);
-    try_match(0x94, "STY", AddressingType::ZeroPageX);
-    try_match(0x95, "STA", AddressingType::ZeroPageX);
-    try_match(0x96, "STX", AddressingType::ZeroPageY);
-    try_match(0x98, "TYA", AddressingType::Implied);
-    try_match(0x99, "STA", AddressingType::AbsoluteY);
-    try_match(0x9D, "STA", AddressingType::AbsoluteX);
-    try_match(0xA0, "LDY", AddressingType::Immediate);
-    try_match(0xA1, "LDA", AddressingType::IndirectX);
-    try_match(0xA2, "LDX", AddressingType::Immediate);
-    try_match(0xA4, "LDY", AddressingType::ZeroPage);
-    try_match(0xA5, "LDA", AddressingType::ZeroPage);
-    try_match(0xA6, "LDX", AddressingType::ZeroPage);
-    try_match(0xA8, "TAY", AddressingType::Implied);
-    try_match(0xA9, "LDA", AddressingType::Immediate);
-    try_match(0xAA, "LDX", AddressingType::Accumulator);
-    try_match(0xAC, "LDY", AddressingType::Absolute);
-    try_match(0xAD, "LDA", AddressingType::Absolute);
-    try_match(0xAE, "LDX", AddressingType::Absolute);
-    try_match(0xB0, "BCS", AddressingType::Relative);
-    try_match(0xB1, "LDA", AddressingType::IndirectY);
-    try_match(0xB4, "LDY", AddressingType::ZeroPageX);
-    try_match(0xB5, "LDA", AddressingType::ZeroPageX);
-    try_match(0xB6, "LDX", AddressingType::ZeroPageY);
-    try_match(0xB8, "CLV", AddressingType::Implied);
-    try_match(0xB9, "LDA", AddressingType::AbsoluteY);
-    try_match(0xBA, "TSX", AddressingType::Implied);
-    try_match(0xBC, "LDY", AddressingType::AbsoluteX);
-    try_match(0xBD, "LDA", AddressingType::AbsoluteX);
-    try_match(0xBE, "LDX", AddressingType::AbsoluteY);
-    try_match(0xC0, "CPY", AddressingType::Immediate);
-    try_match(0xC1, "CMP", AddressingType::IndirectX);
-    try_match(0xC4, "CPY", AddressingType::ZeroPage);
-    try_match(0xC5, "CMP", AddressingType::ZeroPage);
-    try_match(0xC6, "DEC", AddressingType::ZeroPage);
-    try_match(0xC8, "INY", AddressingType::Implied);
-    try_match(0xC9, "CMP", AddressingType::Immediate);
-    try_match(0xCA, "DEX", AddressingType::Implied);
-    try_match(0xCC, "CPY", AddressingType::Absolute);
-    try_match(0xCD, "CMP", AddressingType::Absolute);
-    try_match(0xCE, "DEC", AddressingType::Absolute);
-    try_match(0xD0, "BNE", AddressingType::Relative);
-    try_match(0xD1, "CMP", AddressingType::IndirectY);
-    try_match(0xD5, "CMP", AddressingType::ZeroPageX);
-    try_match(0xD6, "DEC", AddressingType::ZeroPageY);
-    try_match(0xD8, "CLD", AddressingType::Implied);
-    try_match(0xD9, "CMP", AddressingType::AbsoluteY);
-    try_match(0xDD, "CMP", AddressingType::AbsoluteX);
-    try_match(0xDE, "DEC", AddressingType::AbsoluteY);
-    try_match(0xE0, "CPX", AddressingType::Immediate);
-    try_match(0xE1, "SBC", AddressingType::IndirectX);
-    try_match(0xE4, "CPX", AddressingType::ZeroPage);
-    try_match(0xE5, "SBC", AddressingType::ZeroPage);
-    try_match(0xE6, "INC", AddressingType::ZeroPage);
-    try_match(0xE8, "INX", AddressingType::Implied);
-    try_match(0xE9, "SBC", AddressingType::Immediate);
-    try_match(0xEA, "NOP", AddressingType::Implied);
-    try_match(0xEC, "CPX", AddressingType::Absolute);
-    try_match(0xED, "SBC", AddressingType::Absolute);
-    try_match(0xEE, "INC", AddressingType::Absolute);
-    try_match(0xF0, "BNE", AddressingType::Relative);
-    try_match(0xF1, "SBC", AddressingType::IndirectY);
-    try_match(0xF5, "SBC", AddressingType::ZeroPageX);
-    try_match(0xF6, "INC", AddressingType::ZeroPageY);
-    try_match(0xF8, "SED", AddressingType::Implied);
-    try_match(0xF9, "SBC", AddressingType::AbsoluteY);
-    try_match(0xFD, "SBC", AddressingType::AbsoluteX);
-    try_match(0xFE, "INC", AddressingType::AbsoluteY);
 #undef try_match
     return 0x00; // BRK
 }
@@ -2101,7 +2134,7 @@ inline auto destruct_hilo(address_t a) {
 }
 
 template <std::ranges::range R>
-// requires std::is_same_v<AsmInst, std::ranges::range_value_t<R>>
+// requires std::is_same_v<AsmbInstruction, std::ranges::range_value_t<R>>
 auto assemble(R &&listing, LabelMap const &labels, address_t base) {
     std::vector<value_t> bytecode;
     for (auto i : listing) {
@@ -2213,24 +2246,36 @@ auto assemble(R &&listing, LabelMap const &labels, address_t base) {
                     bytecode.append_range(std::vector<value_t>{encode_inst_op<AddressingType::Indirect>(mne), lo, hi});
                 },
                 [&bytecode, mne](Param::IdxIndirectAddress p) {
-                    auto [hi, lo] = destruct_hilo(p.second.store);
-                    bytecode.append_range(std::vector<value_t>{encode_inst_op<AddressingType::IndirectX>(mne), lo, hi});
+                    auto [hi, addr] = destruct_hilo(p.second.store);
+                    if (hi != 0) {
+                        std::cerr << "WARN: address is too large, taking the lower byte\n";
+                    }
+                    bytecode.append_range(std::vector<value_t>{encode_inst_op<AddressingType::IndirectX>(mne), addr});
                 },
                 [&bytecode, mne, &labels](Param::IdxIndirectLabel p) {
                     std::string search_key{p.second.store};
-                    auto addr = labels.contains(search_key) ? labels.at(search_key) : 0U;
-                    auto [hi, lo] = destruct_hilo(addr);
-                    bytecode.append_range(std::vector<value_t>{encode_inst_op<AddressingType::IndirectX>(mne), lo, hi});
+                    auto raw_addr = labels.contains(search_key) ? labels.at(search_key) : 0U;
+                    auto [hi, addr] = destruct_hilo(raw_addr);
+                    if (hi != 0) {
+                        std::cerr << "WARN: address is too large, taking the lower byte\n";
+                    }
+                    bytecode.append_range(std::vector<value_t>{encode_inst_op<AddressingType::IndirectX>(mne), addr});
                 },
                 [&bytecode, mne](Param::IndirectIdxAddress p) {
-                    auto [hi, lo] = destruct_hilo(p.second.store);
-                    bytecode.append_range(std::vector<value_t>{encode_inst_op<AddressingType::IndirectY>(mne), lo, hi});
+                    auto [hi, addr] = destruct_hilo(p.second.store);
+                    if (hi != 0) {
+                        std::cerr << "WARN: address is too large, taking the lower byte\n";
+                    }
+                    bytecode.append_range(std::vector<value_t>{encode_inst_op<AddressingType::IndirectY>(mne), addr});
                 },
                 [&bytecode, mne, &labels](Param::IndirectIdxLabel p) {
                     std::string search_key{p.second.store};
-                    auto addr = labels.contains(search_key) ? labels.at(search_key) : 0U;
-                    auto [hi, lo] = destruct_hilo(addr);
-                    bytecode.append_range(std::vector<value_t>{encode_inst_op<AddressingType::IndirectY>(mne), lo, hi});
+                    auto raw_addr = labels.contains(search_key) ? labels.at(search_key) : 0U;
+                    auto [hi, addr] = destruct_hilo(raw_addr);
+                    if (hi != 0) {
+                        std::cerr << "WARN: address is too large, taking the lower byte\n";
+                    }
+                    bytecode.append_range(std::vector<value_t>{encode_inst_op<AddressingType::IndirectY>(mne), addr});
                 },
                 //    [](std::monostate) { /* Error! */ },
                 [](auto x) {
@@ -2242,14 +2287,6 @@ auto assemble(R &&listing, LabelMap const &labels, address_t base) {
             i.parameter);
     }
     return bytecode;
-}
-
-template <std::ranges::range R>
-bool load_to_memory(Processor &proc, address_t address, R &&r) {
-    for (auto [offset, b] : r | std::views::enumerate) {
-        proc.memory.set_byte(address + offset, b);
-    }
-    return true;
 }
 
 } // namespace Assemble
@@ -2315,158 +2352,7 @@ auto disassemble(std::span<value_t> bytecode) {
                })                                                                                                      \
             .template operator()<given_am>()
 
-    switch (bytecode[0]) {
-        try_match(0x00, "BRK", AddressingType::Implied);
-        try_match(0x01, "ORA", AddressingType::IndirectX);
-        try_match(0x05, "ORA", AddressingType::ZeroPage);
-        try_match(0x06, "ASL", AddressingType::ZeroPage);
-        try_match(0x08, "PHP", AddressingType::Implied);
-        try_match(0x09, "ORA", AddressingType::Immediate);
-        try_match(0x0A, "ASL", AddressingType::Accumulator);
-        try_match(0x0D, "ORA", AddressingType::Absolute);
-        try_match(0x0E, "ASL", AddressingType::Absolute);
-        try_match(0x10, "BPL", AddressingType::Relative);
-        try_match(0x11, "ORA", AddressingType::IndirectY);
-        try_match(0x15, "ORA", AddressingType::ZeroPageX);
-        try_match(0x16, "ASL", AddressingType::ZeroPageX);
-        try_match(0x18, "CLC", AddressingType::Implied);
-        try_match(0x19, "ORA", AddressingType::AbsoluteY);
-        try_match(0x1D, "ORA", AddressingType::AbsoluteX);
-        try_match(0x1E, "ASL", AddressingType::AbsoluteX);
-        try_match(0x20, "JSR", AddressingType::Absolute);
-        try_match(0x21, "AND", AddressingType::IndirectX);
-        try_match(0x24, "BIT", AddressingType::ZeroPage);
-        try_match(0x25, "AND", AddressingType::ZeroPage);
-        try_match(0x26, "ROL", AddressingType::ZeroPage);
-        try_match(0x28, "PLP", AddressingType::Implied);
-        try_match(0x29, "AND", AddressingType::Immediate);
-        try_match(0x2A, "ROL", AddressingType::Accumulator);
-        try_match(0x2C, "BIT", AddressingType::Absolute);
-        try_match(0x2D, "AND", AddressingType::Absolute);
-        try_match(0x2E, "ROL", AddressingType::Absolute);
-        try_match(0x30, "BMI", AddressingType::Relative);
-        try_match(0x31, "AND", AddressingType::IndirectY);
-        try_match(0x35, "AND", AddressingType::ZeroPageX);
-        try_match(0x36, "ROL", AddressingType::ZeroPageX);
-        try_match(0x38, "SEC", AddressingType::Implied);
-        try_match(0x39, "AND", AddressingType::AbsoluteY);
-        try_match(0x3D, "AND", AddressingType::AbsoluteX);
-        try_match(0x3E, "ROL", AddressingType::AbsoluteX);
-        try_match(0x40, "RTI", AddressingType::Implied);
-        try_match(0x41, "EOR", AddressingType::IndirectX);
-        try_match(0x45, "EOR", AddressingType::ZeroPage);
-        try_match(0x46, "LSR", AddressingType::ZeroPage);
-        try_match(0x48, "PHA", AddressingType::Implied);
-        try_match(0x49, "EOR", AddressingType::Immediate);
-        try_match(0x4A, "LSR", AddressingType::Accumulator);
-        try_match(0x4C, "JMP", AddressingType::Absolute);
-        try_match(0x4D, "EOR", AddressingType::Absolute);
-        try_match(0x4E, "LSR", AddressingType::Absolute);
-        try_match(0x50, "BVC", AddressingType::Relative);
-        try_match(0x51, "EOR", AddressingType::IndirectY);
-        try_match(0x55, "EOR", AddressingType::ZeroPageX);
-        try_match(0x56, "LSR", AddressingType::ZeroPageX);
-        try_match(0x58, "CLI", AddressingType::Implied);
-        try_match(0x59, "EOR", AddressingType::AbsoluteY);
-        try_match(0x5D, "EOR", AddressingType::AbsoluteX);
-        try_match(0x5E, "LSR", AddressingType::AbsoluteX);
-        try_match(0x60, "RTS", AddressingType::Implied);
-        try_match(0x61, "ADC", AddressingType::IndirectX);
-        try_match(0x65, "ADC", AddressingType::ZeroPage);
-        try_match(0x66, "ROR", AddressingType::ZeroPage);
-        try_match(0x68, "PLA", AddressingType::Implied);
-        try_match(0x69, "ADC", AddressingType::Immediate);
-        try_match(0x6A, "ROR", AddressingType::Accumulator);
-        try_match(0x6C, "JMP", AddressingType::Absolute);
-        try_match(0x6D, "ADC", AddressingType::Absolute);
-        try_match(0x6E, "ROR", AddressingType::Absolute);
-        try_match(0x70, "BVC", AddressingType::Relative);
-        try_match(0x71, "ADC", AddressingType::IndirectY);
-        try_match(0x75, "ADC", AddressingType::ZeroPageX);
-        try_match(0x76, "ROR", AddressingType::ZeroPageX);
-        try_match(0x78, "SEI", AddressingType::Implied);
-        try_match(0x79, "ADC", AddressingType::AbsoluteY);
-        try_match(0x7D, "ADC", AddressingType::AbsoluteX);
-        try_match(0x7E, "ROR", AddressingType::AbsoluteX);
-        try_match(0x81, "STA", AddressingType::IndirectX);
-        try_match(0x84, "STY", AddressingType::ZeroPage);
-        try_match(0x85, "STA", AddressingType::ZeroPage);
-        try_match(0x86, "STX", AddressingType::ZeroPage);
-        try_match(0x88, "DEY", AddressingType::Implied);
-        try_match(0x8A, "TXA", AddressingType::Implied);
-        try_match(0x8C, "STY", AddressingType::Absolute);
-        try_match(0x8D, "STA", AddressingType::Absolute);
-        try_match(0x8E, "STX", AddressingType::Absolute);
-        try_match(0x90, "BCC", AddressingType::Relative);
-        try_match(0x91, "STA", AddressingType::IndirectY);
-        try_match(0x94, "STY", AddressingType::ZeroPageX);
-        try_match(0x95, "STA", AddressingType::ZeroPageX);
-        try_match(0x96, "STX", AddressingType::ZeroPageY);
-        try_match(0x98, "TYA", AddressingType::Implied);
-        try_match(0x99, "STA", AddressingType::AbsoluteY);
-        try_match(0x9D, "STA", AddressingType::AbsoluteX);
-        try_match(0xA0, "LDY", AddressingType::Immediate);
-        try_match(0xA1, "LDA", AddressingType::IndirectX);
-        try_match(0xA2, "LDX", AddressingType::Immediate);
-        try_match(0xA4, "LDY", AddressingType::ZeroPage);
-        try_match(0xA5, "LDA", AddressingType::ZeroPage);
-        try_match(0xA6, "LDX", AddressingType::ZeroPage);
-        try_match(0xA8, "TAY", AddressingType::Implied);
-        try_match(0xA9, "LDA", AddressingType::Immediate);
-        try_match(0xAA, "LDX", AddressingType::Accumulator);
-        try_match(0xAC, "LDY", AddressingType::Absolute);
-        try_match(0xAD, "LDA", AddressingType::Absolute);
-        try_match(0xAE, "LDX", AddressingType::Absolute);
-        try_match(0xB0, "BCS", AddressingType::Relative);
-        try_match(0xB1, "LDA", AddressingType::IndirectY);
-        try_match(0xB4, "LDY", AddressingType::ZeroPageX);
-        try_match(0xB5, "LDA", AddressingType::ZeroPageX);
-        try_match(0xB6, "LDX", AddressingType::ZeroPageY);
-        try_match(0xB8, "CLV", AddressingType::Implied);
-        try_match(0xB9, "LDA", AddressingType::AbsoluteY);
-        try_match(0xBA, "TSX", AddressingType::Implied);
-        try_match(0xBC, "LDY", AddressingType::AbsoluteX);
-        try_match(0xBD, "LDA", AddressingType::AbsoluteX);
-        try_match(0xBE, "LDX", AddressingType::AbsoluteY);
-        try_match(0xC0, "CPY", AddressingType::Immediate);
-        try_match(0xC1, "CMP", AddressingType::IndirectX);
-        try_match(0xC4, "CPY", AddressingType::ZeroPage);
-        try_match(0xC5, "CMP", AddressingType::ZeroPage);
-        try_match(0xC6, "DEC", AddressingType::ZeroPage);
-        try_match(0xC8, "INY", AddressingType::Implied);
-        try_match(0xC9, "CMP", AddressingType::Immediate);
-        try_match(0xCA, "DEX", AddressingType::Implied);
-        try_match(0xCC, "CPY", AddressingType::Absolute);
-        try_match(0xCD, "CMP", AddressingType::Absolute);
-        try_match(0xCE, "DEC", AddressingType::Absolute);
-        try_match(0xD0, "BNE", AddressingType::Relative);
-        try_match(0xD1, "CMP", AddressingType::IndirectY);
-        try_match(0xD5, "CMP", AddressingType::ZeroPageX);
-        try_match(0xD6, "DEC", AddressingType::ZeroPageY);
-        try_match(0xD8, "CLD", AddressingType::Implied);
-        try_match(0xD9, "CMP", AddressingType::AbsoluteY);
-        try_match(0xDD, "CMP", AddressingType::AbsoluteX);
-        try_match(0xDE, "DEC", AddressingType::AbsoluteY);
-        try_match(0xE0, "CPX", AddressingType::Immediate);
-        try_match(0xE1, "SBC", AddressingType::IndirectX);
-        try_match(0xE4, "CPX", AddressingType::ZeroPage);
-        try_match(0xE5, "SBC", AddressingType::ZeroPage);
-        try_match(0xE6, "INC", AddressingType::ZeroPage);
-        try_match(0xE8, "INX", AddressingType::Implied);
-        try_match(0xE9, "SBC", AddressingType::Immediate);
-        try_match(0xEA, "NOP", AddressingType::Implied);
-        try_match(0xEC, "CPX", AddressingType::Absolute);
-        try_match(0xED, "SBC", AddressingType::Absolute);
-        try_match(0xEE, "INC", AddressingType::Absolute);
-        try_match(0xF0, "BNE", AddressingType::Relative);
-        try_match(0xF1, "SBC", AddressingType::IndirectY);
-        try_match(0xF5, "SBC", AddressingType::ZeroPageX);
-        try_match(0xF6, "INC", AddressingType::ZeroPageY);
-        try_match(0xF8, "SED", AddressingType::Implied);
-        try_match(0xF9, "SBC", AddressingType::AbsoluteY);
-        try_match(0xFD, "SBC", AddressingType::AbsoluteX);
-        try_match(0xFE, "INC", AddressingType::AbsoluteY);
-    }
+    switch (bytecode[0]) { opcode_map(try_match); }
 #undef try_match
     return ByteInstruction{nullptr};
 }
@@ -2484,6 +2370,194 @@ auto step(Processor &proc) {
     }
     return ins;
 }
+
+template <typename T>
+struct PipeResult {
+    T m_result;
+    size_t m_cycle;
+    PipeResult(T &&result) : m_result{result}, m_cycle{1} {};
+    PipeResult(T const &result) : m_result{result}, m_cycle{1} {};
+    PipeResult(T &&result, size_t cycle) : m_result{result}, m_cycle{cycle} {};
+    PipeResult(T const &result, size_t cycle) : m_result{result}, m_cycle{cycle} {};
+
+    void set_cycle(size_t cycle) {
+        m_cycle = cycle;
+    }
+};
+template <>
+struct PipeResult<void> {
+    size_t m_cycle = 1;
+    void set_cycle(size_t cycle) {
+        m_cycle = cycle;
+    }
+};
+
+using FetchResult = PipeResult<std::span<value_t>>;
+struct Fetch {
+    Processor &proc;
+    address_t internal_pc;
+    FetchResult operator()() {
+        auto get_probe_size = [](value_t first_byte) -> size_t {
+#define try_match(byte, _, am)                                                                                         \
+    case byte:                                                                                                         \
+        return am::size
+            switch (first_byte) {
+                opcode_map(try_match);
+            default:
+                return 1ULL;
+            }
+#undef try_match
+        };
+        auto first_byte = proc.memory.load_byte(internal_pc);
+        if (first_byte) {
+            auto probe_size = get_probe_size(first_byte.value());
+            auto read_pc = internal_pc;
+            internal_pc += probe_size;
+            return proc.memory.probe(read_pc, probe_size);
+        } else {
+            std::cerr << "[Internal] Cannot read from pc!\n";
+            return std::span<value_t>{};
+        }
+    }
+};
+
+using DecodeResult = PipeResult<Instruction::ByteInstruction>;
+struct Decode {
+    Processor &proc;
+    DecodeResult operator()(FetchResult const &prev) {
+        return Instruction::Disassemble::disassemble(prev.m_result);
+    }
+};
+
+struct ExecuteInfo {
+    Instruction::Result m_ir;
+    bool is_branching;
+};
+
+using ExecuteResult = PipeResult<ExecuteInfo>;
+struct Execute {
+    Processor &proc;
+    ExecuteResult operator()(DecodeResult const &prev) {
+        if (prev.m_result) {
+            auto is_branch_ins =
+                str_inlist<"BCC", "BCS", "BEQ", "BMI", "BNE", "BPL", "BVC", "BVS">(prev.m_result.metadata_mne);
+            auto known_pc = proc.pc;
+            auto res{prev.m_result(proc)};
+            auto is_branching = is_branch_ins && res.m_pchange.pc && res.m_pchange.pc.value() != known_pc + 2;
+            // TODO: Support other instructions
+            return ExecuteInfo{.m_ir = res, .is_branching = is_branching};
+        } else {
+            Processor::processor_status_t new_status = proc.ps;
+            // Break due to illegal instruction
+            new_status.flag.B = 1;
+            ProcessorChange result = {.ps = new_status};
+            return ExecuteInfo{.m_ir = result, .is_branching = false};
+        }
+    }
+};
+
+using MemcommitResult = PipeResult<ProcessorChange>;
+struct Memcommit {
+    Processor &proc;
+    MemcommitResult operator()(ExecuteResult prev) {
+        prev.m_result.m_ir.m_write.commit_to(proc);
+        return prev.m_result.m_ir.m_pchange;
+    }
+};
+
+using WritebackResult = PipeResult<void>;
+struct Writeback {
+    Processor &proc;
+    WritebackResult operator()(MemcommitResult prev) {
+        prev.m_result.commit_to(proc);
+        return WritebackResult{};
+    }
+};
+
+struct PipelineProcessor {
+    Processor core;
+    size_t cycle_count = 0;
+    Fetch fet{core};
+    Decode dec{core};
+    Execute exe{core};
+    Memcommit mem{core};
+    Writeback wrb{core};
+
+    struct Pipe {
+        std::any content;
+        size_t cycle_left;
+        bool has_data = false;
+        bool processed = false;
+    };
+
+    static constexpr size_t stages = 5;
+    Pipe pipeline[stages];
+
+    void set_pc(address_t new_pc) {
+        core.pc = new_pc;
+        fet.internal_pc = new_pc;
+    }
+
+    void clock_tick() {
+        for (size_t stage_idx = stages; stage_idx-- > 0;) {
+            if (pipeline[stage_idx].has_data) {
+                if (pipeline[stage_idx].cycle_left != 0) {
+                    --pipeline[stage_idx].cycle_left;
+                }
+                if (!pipeline[stage_idx + 1].has_data && pipeline[stage_idx].cycle_left == 0) {
+                    if (stage_idx + 1 == stages) {
+                        pipeline[stage_idx].has_data = false;
+                    } else {
+                        using std::swap;
+                        swap(pipeline[stage_idx], pipeline[stage_idx + 1]);
+                        pipeline[stage_idx + 1].processed = false;
+                        // pipeline[stage_idx + 1] = pipeline[stage_idx];
+                    }
+                    // swap(pipeline[stage_idx], pipeline[stage_idx + 1]);
+                }
+            }
+        }
+        if (pipeline[4].has_data && !pipeline[4].processed) {
+            WritebackResult p4 = wrb(std::any_cast<MemcommitResult>(pipeline[4].content));
+            pipeline[4].processed = true;
+            pipeline[4].content = p4;
+            pipeline[4].cycle_left = p4.m_cycle;
+        }
+        if (pipeline[3].has_data && !pipeline[3].processed) {
+            MemcommitResult p3 = mem(std::any_cast<ExecuteResult>(pipeline[3].content));
+            pipeline[3].processed = true;
+            pipeline[3].content = p3;
+            pipeline[3].cycle_left = p3.m_cycle;
+        }
+        if (pipeline[2].has_data && !pipeline[2].processed) {
+            ExecuteResult p2 = exe(std::any_cast<DecodeResult>(pipeline[2].content));
+            pipeline[2].processed = true;
+            pipeline[2].content = p2;
+            pipeline[2].cycle_left = p2.m_cycle;
+            if (p2.m_result.is_branching) {
+                // Flush when we branch since it does not make sense
+                pipeline[1].has_data = false;
+                pipeline[0].has_data = false;
+                fet.internal_pc = p2.m_result.m_ir.m_pchange.pc.value();
+            }
+        }
+        if (pipeline[1].has_data && !pipeline[1].processed) {
+            DecodeResult p1 = dec(std::any_cast<FetchResult>(pipeline[1].content));
+            pipeline[1].processed = true;
+            pipeline[1].content = p1;
+            pipeline[1].cycle_left = p1.m_cycle;
+        }
+        if (!pipeline[0].has_data) {
+            FetchResult p0 = fet();
+            pipeline[0].processed = true;
+            pipeline[0].has_data = true;
+            pipeline[0].content = p0;
+            pipeline[0].cycle_left = p0.m_cycle;
+        }
+        // Forward the pipe
+        cycle_count += 1;
+    }
+};
 
 } // namespace Fubuki
 
@@ -2510,6 +2584,98 @@ struct formatter<T> {
         return format_to(ctx.out(), "{} {{ {} }}", typeid(T).name(), t.store);
     }
 };
+
+template <>
+struct formatter<Fubuki::ProcessorChange> {
+    constexpr auto parse(format_parse_context &ctx) {
+        return ctx.begin();
+    }
+    auto format(Fubuki::ProcessorChange const &p, format_context &ctx) const {
+        auto o = ctx.out();
+        if (p.pc) {
+            o = format_to(o, "|PC: {:X}|", p.pc.value());
+        }
+        if (p.sp) {
+            o = format_to(o, "|SP: {:X}|", p.sp.value());
+        }
+        if (p.a) {
+            o = format_to(o, "|A: {}|", p.a.value());
+        }
+        if (p.x) {
+            o = format_to(o, "|X: {}|", p.x.value());
+        }
+        if (p.y) {
+            o = format_to(o, "|Y: {}|", p.y.value());
+        }
+        if (p.ps) {
+            auto &ps = p.ps.value();
+            o = format_to(o, "|PS: {}{}{}{}{}{}{}|", ps.flag.C ? 'C' : 'c', ps.flag.Z ? 'Z' : 'z',
+                          ps.flag.I ? 'I' : 'i', ps.flag.D ? 'D' : 'd', ps.flag.B ? 'B' : 'b', ps.flag.V ? 'V' : 'v',
+                          ps.flag.N ? 'N' : 'n');
+        }
+        return o;
+    }
+};
+template <>
+struct formatter<Fubuki::FetchResult> {
+    constexpr auto parse(format_parse_context &ctx) {
+        return ctx.begin();
+    }
+    auto format(Fubuki::FetchResult const &t, format_context &ctx) const {
+        vector<Fubuki::value_t> v;
+        v.append_range(t.m_result);
+        return format_to(ctx.out(), "{::02X}", v);
+    }
+};
+template <>
+struct formatter<Fubuki::DecodeResult> {
+    constexpr auto parse(format_parse_context &ctx) {
+        return ctx.begin();
+    }
+    auto format(Fubuki::DecodeResult const &t, format_context &ctx) const {
+        return format_to(ctx.out(), "{}", t.m_result.metadata_mne);
+    }
+};
+template <>
+struct formatter<Fubuki::ExecuteResult> {
+    constexpr auto parse(format_parse_context &ctx) {
+        return ctx.begin();
+    }
+    auto format(Fubuki::ExecuteResult const &t, format_context &ctx) const {
+        auto o = ctx.out();
+        auto &p = t.m_result.m_ir.m_pchange;
+        auto &m = t.m_result.m_ir.m_write;
+        o = format_to(o, "{}", p);
+        if (!m.m_dir.empty()) {
+            o = format_to(o, "|Write: {}|", m.m_dir);
+        } else {
+            o = format_to(o, "|No Write|");
+        }
+        if (t.m_result.is_branching) {
+            o = format_to(o, "|Branch|");
+        }
+        return o;
+    }
+};
+template <>
+struct formatter<Fubuki::MemcommitResult> {
+    constexpr auto parse(format_parse_context &ctx) {
+        return ctx.begin();
+    }
+    auto format(Fubuki::MemcommitResult const &t, format_context &ctx) const {
+        return format_to(ctx.out(), "{}", t.m_result);
+    }
+};
+template <>
+struct formatter<Fubuki::WritebackResult> {
+    constexpr auto parse(format_parse_context &ctx) {
+        return ctx.begin();
+    }
+    auto format(Fubuki::WritebackResult const &t, format_context &ctx) const {
+        return format_to(ctx.out(), "Writeback Done");
+    }
+};
+
 } // namespace std
 
 #include <cassert>
@@ -2648,32 +2814,93 @@ void test_assemble() {
         xxassert(5 == proc2.a && 1 == proc2.x && 10 == proc2.y && 0xCAFE == proc2.pc, proc2.a, proc2.x, proc2.y,
                  proc2.pc);
     }
+}
 
-    {
-        std::ifstream fd{"test2.asm"};
-        std::string str2((std::istreambuf_iterator<char>(fd)), std::istreambuf_iterator<char>());
-        auto [ins3, ctx3] = parse_text(str2);
-        Fubuki::Processor proc3;
-        proc3.memory.set_byte(0xFFFEU, 0xFE);
-        proc3.memory.set_byte(0xFFFFU, 0xCA);
-        xxassert(ins3.size() == 7, ins3.size());
-        // for (auto i : ins) {
-        //     xxprint(i.mne, i.parameter);
-        // }
-        auto bin3 = assemble(ins3, ctx3, 0x200U);
-        auto exp_bin3 =
-            std::vector<Fubuki::value_t>{0xa9, 0x00, 0xa2, 0x0a, 0x86, 0x00, 0x65, 0x00, 0xca, 0xd0, 0xf9, 0x00};
-        xxassert(bin3 == exp_bin3);
-        load_to_memory(proc3, 0x200U, bin3);
-        proc3.pc = 0x200U;
-        while (1) {
-            auto last_instruction = Fubuki::step(proc3);
-            if (str_equal<"BRK">(last_instruction.metadata_mne))
-                break;
-        }
+void test_execution() {
+    using namespace Fubuki::Instruction::Assemble;
+    using Fubuki::Processor;
 
-        xxassert(55 == proc3.a && 0 == proc3.x && 0xCAFE == proc3.pc, proc3.a, proc3.x, proc3.pc);
+    std::ifstream fd{"test2.asm"};
+    std::string str2((std::istreambuf_iterator<char>(fd)), std::istreambuf_iterator<char>());
+    auto [ins3, ctx3] = parse_text(str2);
+    Processor proc3;
+    proc3.memory.set_byte(0xFFFEU, 0xFE);
+    proc3.memory.set_byte(0xFFFFU, 0xCA);
+    xxassert(ins3.size() == 7, ins3.size());
+    // for (auto i : ins) {
+    //     xxprint(i.mne, i.parameter);
+    // }
+    auto bin3 = assemble(ins3, ctx3, 0x200U);
+    auto exp_bin3 =
+        std::vector<Fubuki::value_t>{0xa9, 0x00, 0xa2, 0x0a, 0x86, 0x00, 0x65, 0x00, 0xca, 0xd0, 0xf9, 0x00};
+    xxassert(bin3 == exp_bin3);
+    load_to_memory(proc3, 0x200U, bin3);
+    proc3.pc = 0x200U;
+    while (1) {
+        auto last_instruction = Fubuki::step(proc3);
+        if (str_equal<"BRK">(last_instruction.metadata_mne))
+            break;
     }
+
+    xxassert(55 == proc3.a && 0 == proc3.x && 0xCAFE == proc3.pc, proc3.a, proc3.x, proc3.pc);
+}
+
+void report_state(Fubuki::PipelineProcessor const &p) {
+    std::cout << "Cycle: " << p.cycle_count << '\n';
+    // std::cout << std::format("[{}] ", p.pipeline[0].content.type().name());
+    if (p.pipeline[0].has_data) {
+        auto z = std::any_cast<Fubuki::FetchResult>(p.pipeline[0].content);
+        std::cout << std::format("F: {} ({}/{})\n", z, z.m_cycle - p.pipeline[0].cycle_left, z.m_cycle);
+    } else {
+        std::cout << "F: (Empty)\n";
+    }
+    // std::cout << std::format("[{}] ", p.pipeline[1].content.type().name());
+    if (p.pipeline[1].has_data) {
+        auto z = std::any_cast<Fubuki::DecodeResult>(p.pipeline[1].content);
+        std::cout << std::format("D: {} ({}/{})\n", z, z.m_cycle - p.pipeline[1].cycle_left, z.m_cycle);
+    } else {
+        std::cout << "D: (Empty)\n";
+    }
+    // std::cout << std::format("[{}] ", p.pipeline[2].content.type().name());
+    if (p.pipeline[2].has_data) {
+        auto z = std::any_cast<Fubuki::ExecuteResult>(p.pipeline[2].content);
+        std::cout << std::format("E: {} ({}/{})\n", z, z.m_cycle - p.pipeline[2].cycle_left, z.m_cycle);
+    } else {
+        std::cout << "E: (Empty)\n";
+    }
+    // std::cout << std::format("[{}] ", p.pipeline[3].content.type().name());
+    if (p.pipeline[3].has_data) {
+        auto z = std::any_cast<Fubuki::MemcommitResult>(p.pipeline[3].content);
+        std::cout << std::format("M: {} ({}/{})\n", z, z.m_cycle - p.pipeline[3].cycle_left, z.m_cycle);
+    } else {
+        std::cout << "M: (Empty)\n";
+    }
+    // std::cout << std::format("[{}] ", p.pipeline[4].content.type().name());
+    if (p.pipeline[4].has_data) {
+        auto z = std::any_cast<Fubuki::WritebackResult>(p.pipeline[4].content);
+        std::cout << std::format("W: {} ({}/{})\n", z, z.m_cycle - p.pipeline[4].cycle_left, z.m_cycle);
+    } else {
+        std::cout << "W: (Empty)\n";
+    }
+}
+
+void test_pipeline() {
+    using namespace Fubuki::Instruction::Assemble;
+    Fubuki::PipelineProcessor p;
+    p.core.memory.set_byte(0xFFFEU, 0xFE);
+    p.core.memory.set_byte(0xFFFFU, 0xCA);
+    p.set_pc(0x200);
+
+    std::ifstream fd{"sort.asm"};
+    std::string text((std::istreambuf_iterator<char>(fd)), std::istreambuf_iterator<char>());
+    auto [ins, ctx] = parse_text(text);
+    auto bin = assemble(ins, ctx, 0x200U);
+    Fubuki::load_to_memory(p.core, 0x200U, bin);
+    for (unsigned i = 0; i < 20; ++i) {
+        report_state(p);
+        p.clock_tick();
+    }
+    // p.proc.
 }
 
 // NOLINTEND
@@ -2682,5 +2909,6 @@ int main() {
     test_instruction();
     test_algorithm();
     test_assemble();
+    test_pipeline();
     return 0;
 }

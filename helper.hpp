@@ -52,7 +52,8 @@ struct TpString {
 
 template <TpString lhs, TpString rhs>
 struct tpstr_equal {
-    constexpr static const bool value = decltype(lhs)::size == decltype(rhs)::size && std::string_view{lhs.value} == rhs.value;
+    constexpr static const bool value =
+        decltype(lhs)::size == decltype(rhs)::size && std::string_view{lhs.value} == rhs.value;
 };
 template <TpString T, TpString U>
 constexpr bool tpstr_equal_v = tpstr_equal<T, U>::value;
@@ -100,15 +101,15 @@ constexpr auto const not_empty = [](auto s) -> bool {
 };
 constexpr auto const trim_left = [](std::string_view s) -> auto {
     size_t index;
-    for (index = 0; index < s.length() && s[index] == ' '; ++index) {
-    }
-    return index == s.length() ? s : s.substr(index);
+    for (index = 0; index < s.length() && s[index] == ' '; ++index)
+        ;
+    return s.substr(index);
 };
 constexpr auto const trim_right = [](std::string_view s) -> auto {
     size_t index;
-    for (index = s.length(); index-- > 0 && s[index] == ' ';) {
-    }
-    return index == 0 ? s : s.substr(0, index + 1);
+    for (index = s.length(); index > 0 && s[--index] == ' ';)
+        ;
+    return s.substr(0, index + 1);
 };
 constexpr auto const trim = [](std::string_view s) -> auto { return trim_left(trim_right(s)); };
 
